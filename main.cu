@@ -3,6 +3,8 @@
 #include <fstream>
 #include <cstring>
 #include <cuda.h>
+#include <curand_kernel.h>
+
 #define BYTE unsigned char
 
 using namespace std;
@@ -335,14 +337,106 @@ __global__ void AES_Decrypt(aes_block aes_block_array[], BYTE key[], int keyLen,
     }
 }
 
+__device__ long charToNumber(char* arg) {
+    char* p = arg;
+    long number = 0;
+    int neg = 0;
+
+    // Skip whitespace
+    while (*p == ' ' || *p == '\t') ++p;
+
+    // Check for negative numbers
+    if (*p == '-') {
+        neg = 1;
+        ++p;
+    } else if (*p == '+') {
+        ++p;
+    }
+
+    // Convert characters to integer
+    while (*p >= '0' && *p <= '9') {
+        number = number * 10 + (*p - '0');
+        ++p;
+    }
+
+    // Check if the whole string was a valid number
+    if (*p != '\0') {
+        return 1; // Return 1 on error
+    }
+
+    return neg ? -number : number;
+}
+
+__global__ void convertStringToNumber(char *arg, long *result) {
+    *result = charToNumber(arg);
+}
 
 
+__global__ void generateAESKey(BYTE *key, int bits) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int numBytes = bits / 8;
+
+    // Ensure we do not go out of bounds
+    if (idx < numBytes) {
+        // Initialize CURAND generator
+        curandState state;
+        curand_init(0, idx, 0, &state);
+
+        // Generate a random byte
+        key[idx] = curand(&state) % 256;
+    }
+}
 
 
 // ===================== test ============================================
 int main(int argc, char* argv[]) {
+    //READ DESIRED KEY LENGTH START
+    char *h_string = argv[1];
+    long h_result;
+
+    char *d_string;
+    long *d_result;
+
+    cudaMalloc((void **)&d_string, sizeof(h_string));
+    cudaMalloc((void **)&d_result, sizeof(long));
+
+    cudaMemcpy(d_string, h_string, sizeof(h_string), cudaMemcpyHostToDevice);
+
+    // Launch kernel
+    convertStringToNumber<<<1, 1>>>(d_string, d_result);
+
+    cudaMemcpy(&h_result, d_result, sizeof(long), cudaMemcpyDeviceToHost);
+    // READ DESIRED KEY LENGTH END
+
+    // GENERATE KEY START
+    BYTE *d_key;
+    int keyBits = h_result; // Can be 128, 192, or 256
+    int keyBytes = keyBits / 8;
+
+    // Allocate memory on device for the key
+    cudaMalloc((void **)&d_key, keyBytes);
+
+    // Launch kernel to generate key
+    generateAESKey<<<1, keyBytes>>>(d_key, keyBits);
+
+    // Allocate memory on host to copy the key back
+    BYTE *h_key = (BYTE *)malloc(keyBytes * 15);
+
+    // Copy key back to host
+    cudaMemcpy(h_key, d_key, keyBytes, cudaMemcpyDeviceToHost);
+
+    // Print the key
+    for (int i = 0; i < keyBytes; i++) {
+        printf("%02x ", h_key[i]);
+    }
+    printf("\n");
+
+    printf("Key size %d\n", keyBytes);
+
+    // GENERATE KEY END
+
     ifstream ifs;
-    ifs.open(argv[1], std::ifstream::binary);
+    ifs.open(argv[2], std::ifstream::binary);
     if(!ifs){
         cerr<<"Cannot open the input file"<<endl;
         exit(1);
@@ -357,33 +451,9 @@ int main(int argc, char* argv[]) {
     int number_of_zero_pending = infileLength%16;
     aes_block* aes_block_array;
 
-    BYTE key[16 * (14 + 1)];//128
-    //BYTE key[24 * (14 + 1)];//192
-    //BYTE key[32 * (14 + 1)];//256
-    int keyLen = 0;
     int blockLen = 16;
 
-
-    ifstream key_fp;
-    key_fp.open(argv[2]);
-    while(key_fp.peek()!=EOF)
-    {
-        key_fp>>key[keyLen];
-        if(key_fp.eof())
-            break;
-        keyLen++;
-    }
-
-    cout<<keyLen<<endl;
-    switch (keyLen)
-    {
-        case 16:break;
-        case 24:break;
-        case 32:break;
-        default:printf("ERROR : keyLen should be 128, 192, 256bits\n"); return 0;
-    }
-
-    int expandKeyLen = AES_ExpandKey(key, keyLen);
+    int expandKeyLen = AES_ExpandKey(h_key, keyBytes);
 
     if(number_of_zero_pending != 0)
         aes_block_array = new aes_block [ block_number + 1];
@@ -438,9 +508,9 @@ int main(int argc, char* argv[]) {
 
     dim3 BlockPerGrid(num_sm);
     cudaMalloc(&cuda_aes_block_array, block_number*sizeof(class aes_block));
-    cudaMalloc(&cuda_key,16*15*sizeof(BYTE) );
+    cudaMalloc(&cuda_key,keyBytes * 15 * sizeof(BYTE));
     cudaMemcpy(cuda_aes_block_array, aes_block_array, block_number*sizeof(class aes_block), cudaMemcpyHostToDevice);
-    cudaMemcpy(cuda_key, key, 16*15*sizeof(BYTE), cudaMemcpyHostToDevice);
+    cudaMemcpy(cuda_key, h_key, keyBytes * 15 * sizeof(BYTE), cudaMemcpyHostToDevice);
     AES_Encrypt <<< BlockPerGrid, ThreadPerBlock>>>(cuda_aes_block_array, cuda_key, expandKeyLen, block_number);
 
     cudaMemcpy(aes_block_array, cuda_aes_block_array, block_number*sizeof(class aes_block), cudaMemcpyDeviceToHost);
