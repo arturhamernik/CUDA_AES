@@ -1,0 +1,6 @@
+cmake-build-debug
+test/1mb.txt
+test/5mb.txt
+test/10mb.txt
+test/50mb.txt
+test/100mb.txt
